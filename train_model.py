@@ -1,3 +1,5 @@
+import polars as pl
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -107,3 +109,40 @@ def delete_null_columns(df, null_percentage):
         col_name for col_name in df.columns if df[col_name].null_count() <= threshold
     ]
     return df.select(columns_to_keep)
+
+def calculate_lag_correlations(df, lags):
+    """
+    Calculates and returns the lagged correlations between different tokens' prices in the dataset.
+
+    Parameters:
+    - df: The input dataframe containing at least 'token', 'date', and 'price' columns.
+    - lags (optional): A list of integers specifying the lag days for which to calculate correlations.
+
+    The function iterates over each unique token pair in the dataset, computes the correlation of their prices at
+    specified lags, and returns a dictionary with these correlations. The dictionary keys are formatted as
+    "{base_token}_vs_{compare_token}" with sub-keys for each lag indicating the correlation at that lag.
+
+    Returns:
+    A dictionary of lagged price correlations for each token pair in the dataset.
+    """
+
+    correlations = {}
+    tokens = df.select("token").unique().to_numpy().flatten()
+    for base_token in tokens:
+        for compare_token in tokens:
+            if base_token == compare_token:
+                continue
+            base_df = df.filter(pl.col("token") == base_token).select(["date", "price"]).sort("date")
+            compare_df = df.filter(pl.col("token") == compare_token).select(["date", "price"]).sort("date")
+            merged_df = base_df.join(compare_df, on="date", suffix="_compare")
+            key = f"{base_token}_vs_{compare_token}"
+            correlations[key] = {}
+            for lag in lags:
+                merged_df_lagged = merged_df.with_columns(pl.col("price_compare").shift(lag))
+                corr_df = merged_df_lagged.select(
+                    pl.corr("price", "price_compare").alias("correlation")
+                )
+                corr = corr_df.get_column("correlation")[0]
+                correlations[key][f"lag_{lag}_days"] = corr
+                
+    return correlations
