@@ -53,3 +53,20 @@ def train_model(model, criterion, optimizer, X_train, y_train, epochs=100):
         if epoch % 10 == 0:
             print(f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item()}")
     return model
+
+def predict(model, X_test):
+    """
+    Makes predictions using a trained model on the provided test data.
+
+    Parameters:
+    - model: The trained neural network model.
+    - X_test: Test data features as a NumPy array.
+
+    Returns:
+    Predictions as a NumPy array.
+    """
+    model.eval()
+    X_test_tensor = torch.tensor(X_test.astype(np.float32))
+    with torch.no_grad():
+        y_pred_tensor = model(X_test_tensor)
+    return y_pred_tensor.numpy()
