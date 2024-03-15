@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+TARGET_LAG = 1 # target lag
+
 class Net(nn.Module):
     """Simple neural network to forecast token trends"""
     def __init__(self, input_size):
@@ -146,3 +148,39 @@ def calculate_lag_correlations(df, lags):
                 correlations[key][f"lag_{lag}_days"] = corr
                 
     return correlations
+
+def main_dataset_manipulation():
+    """
+    """
+
+def apy_dataset_manipulation():
+    """
+    """
+
+def tvl_dataset_manipulation():
+    """
+    """
+
+def load_and_df_preprocessing():
+    """
+    Loads and processes the main, APY, and TVL datasets, joining them on the date column and performing postprocessing.
+
+    Returns:
+    A DataFrame ready for further analysis or model training, containing combined and processed features from all datasets.
+    """
+
+    df_main = main_dataset_manipulation()
+    apy_df = apy_dataset_manipulation()
+    tvl_df = tvl_dataset_manipulation()
+
+    df_main = df_main.join(tvl_df, on = "date", how = "inner")
+    df_main = df_main.join(apy_df, on = "date", how = "inner")
+
+    num_rows_to_select = len(df_main) - TARGET_LAG
+    df_main = df_main.slice(0, num_rows_to_select)
+
+    # Some of the extra tokens we added do not have much historical information, so we raised the minimum date of our dataset a little bit.
+    df_main = df_main.filter(pl.col("year") >= 2022)
+    df_main = df_main.drop(["token","market_cap"])
+    df_main = delete_null_columns(df_main, 0.2)
+    return df_main
