@@ -4,7 +4,15 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+# Giza stack
+from giza_actions import task
+from giza_datasets import DatasetsLoader
+
+LOADER = DatasetsLoader()
+TOKEN_NAME = "WETH" # Choose one of the available tokens in the main dataset.
 TARGET_LAG = 1 # target lag
+STARTER_DATE = pl.datetime(2022, 6, 1)
+
 
 class Net(nn.Module):
     """Simple neural network to forecast token trends"""
@@ -151,16 +159,129 @@ def calculate_lag_correlations(df, lags):
 
 def main_dataset_manipulation():
     """
+    Performs the main dataset manipulation including loading the dataset, generating features, and calculating correlations.
+
+    This function executes several steps:
+    - Loads the 'tokens-daily-prices-mcap-volume' dataset.
+    - Filters the dataset for a specified token.
+    - Calculates various features such as price differences and trends over different days.
+    - Adds day of the week, month of the year, and year as features.
+    - Calculates lag correlations between the specified token and all other tokens in the dataset.
+    - Identifies the top 10 correlated tokens based on 15-day lag correlation.
+    - Joins features of the top 10 correlated tokens to the main dataframe.
+    
+    Returns:
+    A DataFrame containing the original features along with the newly calculated features and correlations for further analysis.
     """
+    daily_token_prices = LOADER.load('tokens-daily-prices-mcap-volume')
+
+    df_main = daily_token_prices.filter(pl.col("token") == TOKEN_NAME)
+
+    df_main = df_main.with_columns(
+        ((pl.col("price").shift(-TARGET_LAG) - pl.col("price")) > 0).cast(pl.Int8).alias("target")
+    )
+
+    df_main = df_main.with_columns([
+        (pl.col("price").diff().alias("diff_price_1_days_ago")),
+        ((pl.col("price") - pl.col("price").shift(1)) > 0).cast(pl.Int8).alias("trend_1_day"),
+        (pl.col("price").diff(n = 3).alias("diff_price_3_days_ago")),
+        ((pl.col("price") - pl.col("price").shift(3)) > 0).cast(pl.Int8).alias("trend_3_day"),
+        (pl.col("price").diff(n = 7).alias("diff_price_7_days_ago")),
+        ((pl.col("price") - pl.col("price").shift(7)) > 0).cast(pl.Int8).alias("trend_7_day"),
+        (pl.col("price").diff(n = 15).alias("diff_price_15_days_ago")),
+        ((pl.col("price") - pl.col("price").shift(15)) > 0).cast(pl.Int8).alias("trend_15_day"),
+        (pl.col("price").diff(n = 30).alias("diff_price_30_days_ago")),
+        ((pl.col("price") - pl.col("price").shift(30)) > 0).cast(pl.Int8).alias("trend_30_day")
+        ]
+    )
+    df_main = df_main.with_columns([
+        pl.col("date").dt.weekday().alias("day_of_week"),
+        pl.col("date").dt.month().alias("month_of_year"),
+        pl.col("date").dt.year().alias("year")
+    ])
+
+    correlations = calculate_lag_correlations(daily_token_prices)
+
+    data = []
+    for tokens, lags in correlations.items():
+        base_token, compare_token = tokens.split('_vs_')
+        for lag, corr_value in lags.items():
+            data.append({'Base Token': base_token, 'Compare Token': compare_token, 'Lag': lag, 'Correlation': corr_value})
+
+    df_correlations = pl.DataFrame(data)
+
+    top_10_correlated_coins =df_correlations.filter((pl.col("Base Token") == TOKEN_NAME) & 
+                                                    (pl.col("Lag") == "lag_15_days")).sort(by="Correlation", descending = True)["Compare Token"].to_list()[0:10]
+
+    for token in top_10_correlated_coins:
+        df_token = daily_token_prices.filter(pl.col("token") == token)
+        df_token_features = df_token.with_columns([
+            pl.col("price").diff(n = 1).alias(f"diff_price_1_days_ago{token}"),
+            ((pl.col("price") - pl.col("price").shift(1)) > 0).cast(pl.Int8).alias(f"trend_1_day{token}"),
+            pl.col("price").diff(n = 3).alias(f"diff_price_3_days_ago{token}"),
+            ((pl.col("price") - pl.col("price").shift(3)) > 0).cast(pl.Int8).alias(f"trend_3_day{token}"),
+            pl.col("price").diff(n = 7).alias(f"diff_price_7_days_ago{token}"),
+            ((pl.col("price") - pl.col("price").shift(7)) > 0).cast(pl.Int8).alias(f"trend_7_day{token}"),
+            pl.col("price").diff(n = 15).alias(f"diff_price_15_days_ago{token}"),
+            ((pl.col("price") - pl.col("price").shift(15)) > 0).cast(pl.Int8).alias(f"trend_15_day{token}"),
+        ]).select([
+            pl.col("date"),
+            f"diff_price_1_days_ago{token}",
+            f"diff_price_3_days_ago{token}",
+            f"diff_price_7_days_ago{token}",
+            f"diff_price_15_days_ago{token}",
+            f"trend_1_day{token}",
+            f"trend_3_day{token}",
+            f"trend_7_day{token}",
+            f"trend_15_day{token}",
+        ])
+        df_main = df_main.join(df_token_features, on="date", how="left")
+        return df_main
 
 def apy_dataset_manipulation():
-    """
-    """
+    apy_df = LOADER.load("top-pools-apy-per-protocol")
 
+    apy_df = apy_df.filter(pl.col("underlying_token").str.contains(TOKEN_NAME))
+
+    apy_df = apy_df.with_columns(
+        pl.col("project") + "_" + pl.col("chain") +  pl.col("underlying_token")
+    )
+    apy_df = apy_df.drop(["underlying_token", "chain"])
+
+    unique_projects = apy_df.filter(pl.col("date") <= STARTER_DATE).select("project").unique()
+
+    apy_df_token = apy_df.join(
+        unique_projects, 
+        on="project", 
+        how="inner"
+    )
+
+    apy_df_token = apy_df_token.pivot(
+        index="date",
+        columns="project",
+        values=["tvlUsd", "apy"]
+    )
+    return apy_df_token
 def tvl_dataset_manipulation():
     """
-    """
+    Manipulates the TVL (Total Value Locked) dataset for a specific token to prepare it for analysis.
 
+    Returns:
+    A pivoted DataFrame focused on the specified token's TVL, with each row representing a date and each column representing a different project's TVL.
+    """
+    tvl_df = LOADER.load("tvl-per-project-tokens")
+
+    tvl_df = tvl_df.filter(tvl_df[["date", "project"]].is_duplicated() == False)
+    tvl_df = tvl_df.filter(tvl_df["date"] > STARTER_DATE)
+
+    tvl_df = tvl_df[[TOKEN_NAME, "project", "date"]].pivot(
+        index="date",
+        columns="project",
+        values= TOKEN_NAME
+    )
+    return tvl_df
+
+@task(name=f'Join and postprocessing')
 def load_and_df_preprocessing():
     """
     Loads and processes the main, APY, and TVL datasets, joining them on the date column and performing postprocessing.
