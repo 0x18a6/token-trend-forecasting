@@ -3,6 +3,8 @@ import polars as pl
 import torch
 import torch.nn as nn
 import numpy as np
+from torch.optim import optim
+
 
 # Giza stack
 from giza_actions import task
@@ -305,3 +307,31 @@ def load_and_df_preprocessing():
     df_main = df_main.drop(["token","market_cap"])
     df_main = delete_null_columns(df_main, 0.2)
     return df_main
+
+@task(name=f'prepare and train')
+def prepare_and_train(X_train, y_train):
+    """
+    Prepares the training data and trains the neural network model.
+
+    Parameters:
+    - X_train: Feature DataFrame for training.
+    - y_train: Target DataFrame for training.
+
+    This function converts the training data to NumPy arrays, initializes the neural network model, and trains it using the specified features and targets.
+
+    Returns:
+    The trained neural network model.
+    """
+    X_train_np = X_train.to_numpy().astype(np.float32)
+    y_train_np = y_train.to_numpy().astype(np.float32).reshape(-1, 1)
+
+    input_size = X_train_np.shape[1]
+    model = Net(input_size)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    criterion = nn.BCELoss()
+
+    trained_model = train_model(model, criterion, optimizer, X_train_np, y_train_np)
+    return trained_model
+
+
+
