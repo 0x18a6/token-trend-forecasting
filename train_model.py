@@ -3,7 +3,7 @@ import polars as pl
 import torch
 import torch.nn as nn
 import numpy as np
-from torch.optim import optim
+import torch.optim as optim
 
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 
