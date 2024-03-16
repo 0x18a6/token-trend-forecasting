@@ -5,6 +5,7 @@ import torch.nn as nn
 import numpy as np
 from torch.optim import optim
 
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 
 # Giza stack
 from giza_actions.action import Action, action
@@ -429,3 +430,31 @@ def execution():
 if __name__ == "__main__":
     action_deploy = Action(entrypoint=execution, name="pytorch-token-trend-action")
     action_deploy.serve(name="pytorch-token-trend-deployment")
+
+def print_classification_metrics(y_test, y_pred, y_pred_proba = None):
+    """
+    Prints classification metrics including accuracy, precision, recall, F1 score, and optionally AUC.
+
+    Parameters:
+    - y_test: The true labels for the test data.
+    - y_pred: The predicted labels for the test data.
+    - y_pred_proba (optional): The predicted probabilities for the test data. If provided, AUC will be calculated and printed.
+
+    This function computes and prints the confusion matrix, accuracy, precision, recall, and F1 score of the classification model's predictions. If predicted probabilities are provided, it also computes and prints the AUC score.
+    """
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    
+    cm = confusion_matrix(y_test, y_pred)
+
+    print("Confusion Matrix:")
+    print(cm)
+    print(f"Accuracy: {accuracy}")
+    print(f"Precision: {precision}")
+    print(f"Recall: {recall}")
+    print(f"F1 Score: {f1}")
+    if y_pred_proba is not None:
+        auc = roc_auc_score(y_test, y_pred_proba)
+        print(f"AUC: {auc}")
