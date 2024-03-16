@@ -7,6 +7,7 @@ from torch.optim import optim
 
 
 # Giza stack
+from giza_actions.action import Action, action
 from giza_actions import task
 from giza_datasets import DatasetsLoader
 
@@ -284,7 +285,7 @@ def tvl_dataset_manipulation():
     return tvl_df
 
 @task(name=f'Join and postprocessing')
-def load_and_df_preprocessing():
+def load_and_df_processing():
     """
     Loads and processes the main, APY, and TVL datasets, joining them on the date column and performing postprocessing.
 
@@ -333,5 +334,98 @@ def prepare_and_train(X_train, y_train):
     trained_model = train_model(model, criterion, optimizer, X_train_np, y_train_np)
     return trained_model
 
+@task(name=f'Prepare datasets')
+def prepare_datasets(df):
+    """
+    Prepares the datasets for training and testing by selecting features, splitting the data, and preprocessing.
 
+    Parameters:
+    - df: The main DataFrame containing features and targets.
 
+    Returns:
+    Prepared feature and target DataFrames for both training and testing.
+    """
+    features = list(set(df.columns) - set(["date","month_of_year", "price", "target"]))
+    cutoff_index = int(len(df) * 0.85)
+    df_train = df[:cutoff_index]
+    df_test = df[cutoff_index:]
+    X_train, X_test = prepare_train_test(df_train[features], df_test[features])
+    y_train = df_train.select('target')
+    y_test = df_test.select('target')
+    return X_train, X_test, y_train, y_test
+
+@task(name=f'Test model')
+def test_model(X_test, y_test, model):
+    """
+    Tests the trained model using the test dataset and prints classification metrics.
+
+    Parameters:
+    - X_test: Feature DataFrame for testing.
+    - y_test: Actual target values for the test dataset.
+    - model: The trained neural network model.
+    """
+    X_test_np = X_test.to_numpy().astype(np.float32)
+    y_pred = predict(model, X_test_np)
+    y_pred_labels = (y_pred >= 0.5).astype(int)
+    print_classification_metrics(y_test, y_pred_labels, y_pred)
+    
+@task(name="Convert To ONNX")
+def convert_to_onnx(model, sample_len, onnx_file_path):
+    """
+    Converts a PyTorch model to the ONNX format and saves it to a specified file path.
+
+    Parameters:
+    - model: The PyTorch model to be converted.
+    - sample_len: The length of the input sample, specifying the input size.
+    - onnx_file_path: The file path where the ONNX model will be saved.
+
+    This function takes a trained PyTorch model and a sample input size, exports the model to the ONNX format,
+    and saves it to the provided file path. It specifies model input/output names and handles dynamic batch sizes
+    for flexibility in model deployment.
+    """
+    sample_input = torch.randn(1, sample_len, dtype=torch.float32)
+
+    torch.onnx.export(
+        model,  # Model being exported
+        sample_input,  # Model input (or a tuple for multiple inputs)
+        onnx_file_path,  # Where to save the model
+        export_params=True,  # Store the trained parameter weights inside the model file
+        opset_version=11,  # ONNX version to export the model to
+        do_constant_folding=True,  # Whether to execute constant folding for optimization
+        input_names=["input"],  # Model's input names
+        output_names=["output"],  # Model's output names
+        dynamic_axes={
+            "input": {0: "batch_size"},  # Variable length axes
+            "output": {0: "batch_size"},
+        },
+    )
+    print(f"Model has been converted to ONNX and saved to {onnx_file_path}")
+    
+@action(name=f'Execution', log_prints=True )
+def execution():
+    """
+    Main execution action that processes data, trains a model, tests the model, and converts it to ONNX format.
+
+    This action performs the following steps:
+    - Loads and processes the main dataset.
+    - Prepares datasets for training and testing.
+    - Saves a subset of the test dataset for example predictions.
+    - Trains a neural network model using the prepared training dataset.
+    - Tests the trained model using the test dataset and prints classification metrics.
+    - Converts the trained model to the ONNX format for deployment.
+
+    The ONNX model is saved to a predefined file path, and the action demonstrates an end-to-end workflow from data
+    preprocessing to model deployment in the ONNX format.
+    """
+    df = load_and_df_processing()
+    X_train, X_test, y_train, y_test = prepare_datasets(df)
+    X_test[int(len(X_test) * 0.6):].write_csv("./example_token_trend.csv")
+    model = prepare_and_train(X_train,y_train)
+    test_model(X_test, y_test, model)
+    
+    onnx_file_path = "pytorch-token-trend_action_model.onnx"
+    convert_to_onnx(model, X_test.shape[1], onnx_file_path)
+
+if __name__ == "__main__":
+    action_deploy = Action(entrypoint=execution, name="pytorch-token-trend-action")
+    action_deploy.serve(name="pytorch-token-trend-deployment")
