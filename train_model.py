@@ -1,39 +1,42 @@
 import polars as pl
-
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import torch
 import torch.nn as nn
-import numpy as np
 import torch.optim as optim
+import numpy as np
+import onnxruntime as rt
 
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-
-# Giza stack
-from giza_actions.action import Action, action
-from giza_actions import task
+# GIZA stack
+from giza_actions.task import task
 from giza_datasets import DatasetsLoader
+from giza_actions.action import Action, action
+from giza_actions.task import task
+from giza_actions.model import GizaModel
 
-LOADER = DatasetsLoader()
+import certifi
+import os
+os.environ['SSL_CERT_FILE'] = certifi.where()
+
+
+TARGET_LAG = 1 # target lagg
 TOKEN_NAME = "WETH" # Choose one of the available tokens in the main dataset.
-TARGET_LAG = 1 # target lag
 STARTER_DATE = pl.datetime(2022, 6, 1)
+LOADER = DatasetsLoader()
 
-
-class Net(nn.Module):
-    """Simple neural network to forecast token trends"""
+class SimpleNN(nn.Module):
     def __init__(self, input_size):
-        super(Net, self).__init__()
+        super(SimpleNN, self).__init__()
         self.fc1 = nn.Linear(input_size, 64)
         self.fc2 = nn.Linear(64, 32)
         self.fc3 = nn.Linear(32, 1)
         self.init_weights()
 
     def forward(self, x):
-        x = torch.relu(self.fc1())
-        x = torch.relu(self.fc2())
-        x = torch.sigmoid(self.fc3())
-
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = torch.sigmoid(self.fc3(x))
         return x
-    
+
     def init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -58,7 +61,7 @@ def train_model(model, criterion, optimizer, X_train, y_train, epochs=100):
     model.train()
     X_train_tensor = torch.tensor(X_train.astype(np.float32))
     y_train_tensor = torch.tensor(y_train.astype(np.float32).reshape(-1, 1))
-
+    
     for epoch in range(epochs):
         optimizer.zero_grad()
         outputs = model(X_train_tensor)
@@ -85,7 +88,6 @@ def predict(model, X_test):
     X_test_tensor = torch.tensor(X_test.astype(np.float32))
     with torch.no_grad():
         y_pred_tensor = model(X_test_tensor)
-
     return y_pred_tensor.numpy()
 
 def prepare_train_test(df_train, df_test):
@@ -102,12 +104,11 @@ def prepare_train_test(df_train, df_test):
     for col in df_train.columns:
         mean_val = df_train[col].mean()
         std_dev = df_train[col].std() if df_train[col].std() != 0 else 1
-
         df_train = df_train.with_columns(((df_train[col].fill_null(mean_val) - mean_val) / std_dev).alias(col))
         df_test = df_test.with_columns(((df_test[col].fill_null(mean_val) - mean_val) / std_dev).alias(col))
     return df_train, df_test
 
-def delete_null_columns(df, null_percentage):
+def delete_null_columns(df, null_percentaje):
     """    
     Removes columns from a dataframe where the percentage of null values exceeds a specified threshold.
 
@@ -118,13 +119,41 @@ def delete_null_columns(df, null_percentage):
     Returns:
     The dataframe with columns removed based on the null value threshold.
     """
-    threshold = df.shape[0] * null_percentage
+    threshold = df.shape[0] * null_percentaje
     columns_to_keep = [
         col_name for col_name in df.columns if df[col_name].null_count() <= threshold
     ]
     return df.select(columns_to_keep)
 
-def calculate_lag_correlations(df, lags):
+def print_classification_metrics(y_test, y_pred, y_pred_proba = None):
+    """
+    Prints classification metrics including accuracy, precision, recall, F1 score, and optionally AUC.
+
+    Parameters:
+    - y_test: The true labels for the test data.
+    - y_pred: The predicted labels for the test data.
+    - y_pred_proba (optional): The predicted probabilities for the test data. If provided, AUC will be calculated and printed.
+
+    This function computes and prints the confusion matrix, accuracy, precision, recall, and F1 score of the classification model's predictions. If predicted probabilities are provided, it also computes and prints the AUC score.
+    """
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    
+    cm = confusion_matrix(y_test, y_pred)
+
+    print("Confusion Matrix:")
+    print(cm)
+    print(f"Accuracy: {accuracy}")
+    print(f"Precision: {precision}")
+    print(f"Recall: {recall}")
+    print(f"F1 Score: {f1}")
+    if y_pred_proba is not None:
+        auc = roc_auc_score(y_test, y_pred_proba)
+        print(f"AUC: {auc}")
+
+def calculate_lag_correlations(df, lags=[1, 3, 7, 15]):
     """
     Calculates and returns the lagged correlations between different tokens' prices in the dataset.
 
@@ -139,7 +168,6 @@ def calculate_lag_correlations(df, lags):
     Returns:
     A dictionary of lagged price correlations for each token pair in the dataset.
     """
-
     correlations = {}
     tokens = df.select("token").unique().to_numpy().flatten()
     for base_token in tokens:
@@ -161,7 +189,7 @@ def calculate_lag_correlations(df, lags):
                 
     return correlations
 
-def main_dataset_manipulation():
+def main_dateset_manipulation():
     """
     Performs the main dataset manipulation including loading the dataset, generating features, and calculating correlations.
 
@@ -241,8 +269,14 @@ def main_dataset_manipulation():
         ])
         df_main = df_main.join(df_token_features, on="date", how="left")
         return df_main
+    
+def apy_dateset_manipulation():
+    """
+    Manipulates the APY dataset for a specific token to prepare it for analysis.
 
-def apy_dataset_manipulation():
+    Returns:
+    A pivoted DataFrame focused on the specified token, with each row representing a date and each column representing a different project's TVL and APY.
+    """
     apy_df = LOADER.load("top-pools-apy-per-protocol")
 
     apy_df = apy_df.filter(pl.col("underlying_token").str.contains(TOKEN_NAME))
@@ -266,7 +300,8 @@ def apy_dataset_manipulation():
         values=["tvlUsd", "apy"]
     )
     return apy_df_token
-def tvl_dataset_manipulation():
+
+def tvl_dateset_manipulation():
     """
     Manipulates the TVL (Total Value Locked) dataset for a specific token to prepare it for analysis.
 
@@ -293,10 +328,10 @@ def load_and_df_processing():
     Returns:
     A DataFrame ready for further analysis or model training, containing combined and processed features from all datasets.
     """
-
-    df_main = main_dataset_manipulation()
-    apy_df = apy_dataset_manipulation()
-    tvl_df = tvl_dataset_manipulation()
+     
+    df_main = main_dateset_manipulation()
+    apy_df = apy_dateset_manipulation()
+    tvl_df = tvl_dateset_manipulation()
 
     df_main = df_main.join(tvl_df, on = "date", how = "inner")
     df_main = df_main.join(apy_df, on = "date", how = "inner")
@@ -311,7 +346,7 @@ def load_and_df_processing():
     return df_main
 
 @task(name=f'prepare and train')
-def prepare_and_train(X_train, y_train):
+def prepare_and_train(X_train,y_train):
     """
     Prepares the training data and trains the neural network model.
 
@@ -327,13 +362,13 @@ def prepare_and_train(X_train, y_train):
     X_train_np = X_train.to_numpy().astype(np.float32)
     y_train_np = y_train.to_numpy().astype(np.float32).reshape(-1, 1)
 
+
     input_size = X_train_np.shape[1]
-    model = Net(input_size)
+    model = SimpleNN(input_size)
     optimizer = optim.Adam(model.parameters(), lr=0.01)
     criterion = nn.BCELoss()
-
-    trained_model = train_model(model, criterion, optimizer, X_train_np, y_train_np)
-    return trained_model
+    model = train_model(model, criterion, optimizer, X_train_np, y_train_np, epochs=100)
+    return model
 
 @task(name=f'Prepare datasets')
 def prepare_datasets(df):
@@ -402,7 +437,7 @@ def convert_to_onnx(model, sample_len, onnx_file_path):
     )
     print(f"Model has been converted to ONNX and saved to {onnx_file_path}")
     
-@action(name=f'Execution', log_prints=True )
+@action(name=f'Execution', log_prints=True)
 def execution():
     """
     Main execution action that processes data, trains a model, tests the model, and converts it to ONNX format.
@@ -430,31 +465,3 @@ def execution():
 if __name__ == "__main__":
     action_deploy = Action(entrypoint=execution, name="pytorch-token-trend-action")
     action_deploy.serve(name="pytorch-token-trend-deployment")
-
-def print_classification_metrics(y_test, y_pred, y_pred_proba = None):
-    """
-    Prints classification metrics including accuracy, precision, recall, F1 score, and optionally AUC.
-
-    Parameters:
-    - y_test: The true labels for the test data.
-    - y_pred: The predicted labels for the test data.
-    - y_pred_proba (optional): The predicted probabilities for the test data. If provided, AUC will be calculated and printed.
-
-    This function computes and prints the confusion matrix, accuracy, precision, recall, and F1 score of the classification model's predictions. If predicted probabilities are provided, it also computes and prints the AUC score.
-    """
-    accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    
-    cm = confusion_matrix(y_test, y_pred)
-
-    print("Confusion Matrix:")
-    print(cm)
-    print(f"Accuracy: {accuracy}")
-    print(f"Precision: {precision}")
-    print(f"Recall: {recall}")
-    print(f"F1 Score: {f1}")
-    if y_pred_proba is not None:
-        auc = roc_auc_score(y_test, y_pred_proba)
-        print(f"AUC: {auc}")
